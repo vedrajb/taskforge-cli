@@ -1,0 +1,11 @@
+node_modules/
+dist/
+.env
+.taskforge/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+__ctxparty__
+.codex
+.claude

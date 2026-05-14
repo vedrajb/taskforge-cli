@@ -4,21 +4,62 @@
 
 Add Codex-style input shortcuts to TaskForge:
 
-- `@path/to/file`: attach a workspace file reference to the current prompt.
-- `@path/to/folder`: attach a shallow workspace folder reference to the current prompt.
+- `@agent`: address one configured agent in the current prompt.
+- `$skill`: access one configured skill in the current prompt.
+- `#path/to/file`: attach a workspace file reference to the current prompt.
+- `#path/to/folder`: attach a shallow workspace folder reference to the current prompt.
 - `!command`: run a Git Bash command from the current target workspace.
 
 ## Planned Files
 
 ```text
 src/input/parseUserInput.ts
+src/input/loadSkills.ts
 src/input/resolveFileReferences.ts
 src/input/runBangCommand.ts
 ```
 
-## `@` File References
+## Settings Storage
 
-`@` references resolve relative to `target.cwd`.
+All TaskForge settings are stored under `~/.config/taskforge`.
+
+Rules:
+
+1. Keep user-level settings outside the target workspace.
+2. Use `~/.config/taskforge` as the single settings root for Phase 2.
+3. Store configurable input-shortcut settings there, including the optional skill source folder override.
+4. Store TaskForge session info there so active session state is shared across runs without writing to the target workspace.
+5. Keep `taskforge.config.json` focused on project/workflow configuration, not user-level settings or session state.
+
+## `@` Agent Mentions
+
+`@` mentions address configured agents by id.
+
+Rules:
+
+1. Resolve agent mentions against `agents.<agentId>` in `taskforge.config.json`.
+2. Treat unknown agent mentions as unresolved and show them in the TUI before submitting the prompt.
+3. Allow multiple agent mentions in one prompt.
+4. If no agent is mentioned, keep the normal workflow-selected agent behavior.
+5. Pass resolved agent mentions as structured routing context instead of leaving them only in raw prompt text.
+
+## `$` Skill Access
+
+`$` references access configured skills by id.
+
+Rules:
+
+1. Load skills from the user's `~/.codex` folder by default.
+2. Allow the skills source folder to be overridden in settings stored under `~/.config/taskforge`.
+3. Resolve skill references against the loaded skill registry for TaskForge.
+4. Treat unknown skill references as unresolved and show them in the TUI before submitting the prompt.
+5. Allow multiple skill references in one prompt.
+6. Keep skill references separate from agent routing so a prompt can target both an agent and one or more skills.
+7. Pass resolved skill references as structured execution context instead of leaving them only in raw prompt text.
+
+## `#` File References
+
+`#` references resolve relative to `target.cwd`.
 
 Rules:
 
@@ -54,10 +95,16 @@ The input parser should produce a structured command request. `runProcess.ts` sh
 
 ## Implementation Checklist
 
-1. Add user input parsing for regular text, `@` references, and `!` commands.
-2. Add workspace-bound path resolution for `@` references.
-3. Add shallow folder summary generation.
-4. Add TUI preview for resolved and unresolved references.
-5. Add Git Bash command execution for `!` commands.
-6. Add high-risk command detection and confirmation prompts.
-7. Stream `!` command output through the same TUI log path used for agent output.
+1. Add user input parsing for regular text, `@` agent mentions, `$` skill references, `#` file references, and `!` commands.
+2. Add configured-agent resolution for `@` mentions.
+3. Add skill loading from `~/.codex` by default.
+4. Add `~/.config/taskforge` settings storage.
+5. Add a settings option under `~/.config/taskforge` that overrides the skill source folder.
+6. Add session info storage under `~/.config/taskforge`.
+7. Add configured-skill resolution for `$` references.
+8. Add workspace-bound path resolution for `#` references.
+9. Add shallow folder summary generation.
+10. Add TUI preview for resolved and unresolved references.
+11. Add Git Bash command execution for `!` commands.
+12. Add high-risk command detection and confirmation prompts.
+13. Stream `!` command output through the same TUI log path used for agent output.
