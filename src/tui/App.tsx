@@ -1,26 +1,21 @@
-import React, {useCallback, useEffect, useRef, useState} from 'react';
+import React, {useCallback, useReducer, useRef, useState} from 'react';
 import {Box, useApp, useInput} from 'ink';
 import {LoadedConfig} from '../config/loadConfig.js';
-import {AgentPane, AgentLogLine} from './AgentPane.js';
-import {Footer} from './Footer.js';
-import {InputRow} from './InputRow.js';
-import {PlanPane} from './PlanPane.js';
-import {StatusBar} from './StatusBar.js';
-import {runPlanMode, PlanModeResult} from '../workflows/planMode.js';
+import {runPlanMode} from '../workflows/planMode.js';
 import {runPlanMergeMode} from '../workflows/planMergeMode.js';
 import {runExecuteMode} from '../workflows/executeMode.js';
 import {runReviewMode} from '../workflows/reviewMode.js';
 import {AgentPlan} from '../agents/types.js';
-import {ProcessRunnerEvent} from '../agents/runProcess.js';
-
-type Phase =
-  | 'idle'
-  | 'planning'
-  | 'awaiting_choice'
-  | 'executing'
-  | 'reviewing'
-  | 'done'
-  | 'error';
+import {TranscriptEntry} from './types.js';
+import {reducer, initialState, planResultToEntries} from './reducer.js';
+import {Banner} from './Banner.js';
+import {Transcript} from './Transcript.js';
+import {Spinner} from './Spinner.js';
+import {Composer} from './Composer.js';
+import {HintStrip} from './HintStrip.js';
+import {isCommandMode} from './commands.js';
+import {nanoid} from '../util/nanoid.js';
+import {filterChunk} from './filterOutput.js';
 
 export type AppProps = {
   loadedConfig?: LoadedConfig;
@@ -29,139 +24,127 @@ export type AppProps = {
 
 export function App({loadedConfig, startupError}: AppProps): React.ReactElement {
   const {exit} = useApp();
-  const [phase, setPhase] = useState<Phase>(startupError ? 'error' : 'idle');
-  const [prompt, setPrompt] = useState('');
-  const [submittedPrompt, setSubmittedPrompt] = useState('');
-  const [logs, setLogs] = useState<AgentLogLine[]>(() => [
-    {
-      stream: startupError ? 'stderr' : 'stdout',
-      text: startupError ?? 'TaskForge ready. Enter a request to plan.',
-    },
-  ]);
-  const [planResult, setPlanResult] = useState<PlanModeResult | null>(null);
-  const [selectedPlan, setSelectedPlan] = useState<AgentPlan | null>(null);
-  const [planDisplay, setPlanDisplay] = useState('No plan yet.');
-
+  const [state, dispatch] = useReducer(reducer, undefined, () => initialState(startupError));
   const abortRef = useRef<AbortController | null>(null);
+  const phaseStartRef = useRef<number | null>(null);
+  const [showDiag, setShowDiag] = useState(!!process.env['TF_SHOW_DIAG']);
 
-  const addLog = useCallback((stream: 'stdout' | 'stderr', text: string) => {
-    setLogs((prev) => [...prev, {stream, text}]);
+  const addEntry = useCallback((entry: TranscriptEntry) => {
+    dispatch({type: 'append', entry});
   }, []);
-
-  const makeProcessEventHandler = useCallback(
-    (label: string) =>
-      (event: ProcessRunnerEvent) => {
-        if (event.type === 'output') {
-          addLog(event.stream, `[${label}] ${event.data.trimEnd()}`);
-        }
-      },
-    [addLog]
-  );
 
   const startPlanning = useCallback(
     async (userRequest: string) => {
       if (!loadedConfig) return;
-      setPhase('planning');
-      addLog('stdout', `Starting planning for: ${userRequest}`);
+      dispatch({type: 'phase', phase: 'planning'});
+      phaseStartRef.current = Date.now();
 
       const abort = new AbortController();
       abortRef.current = abort;
+
+      const promptId = nanoid();
+      const agentIds = loadedConfig.config.workflow.planAgents;
+
+      dispatch({type: 'split_start', promptId, phase: 'planning', agentIds});
 
       try {
         const result = await runPlanMode(loadedConfig, userRequest, {
           abortSignal: abort.signal,
           onAgentEvent(ev) {
             if (ev.type === 'output' && ev.data) {
-              addLog(ev.stream ?? 'stdout', `[${ev.agentId}] ${ev.data.trimEnd()}`);
+              for (const fc of filterChunk(ev.data, ev.agentId)) {
+                if (!fc.text.trim()) continue;
+                dispatch({
+                  type: 'split_append',
+                  promptId,
+                  agentId: ev.agentId,
+                  chunk: fc.text,
+                  stream: ev.stream ?? 'stdout',
+                  level: fc.level,
+                });
+              }
+            }
+            if (ev.type === 'exit') {
+              dispatch({
+                type: 'split_agent_done',
+                promptId,
+                agentId: ev.agentId,
+                status: ev.code === 0 ? 'done' : 'failed',
+                error: ev.code !== 0 ? `exit ${ev.code}` : undefined,
+              });
             }
           },
         });
 
-        setPlanResult(result);
+        dispatch({type: 'split_finalize', promptId});
+        phaseStartRef.current = null;
+
+        const {entries, selectedPlan} = planResultToEntries(result);
+        for (const entry of entries) {
+          dispatch({type: 'append', entry});
+        }
+        dispatch({type: 'plan_result', result, selectedPlan});
 
         if (result.status === 'both_failed') {
-          addLog('stderr', `Both agents failed.`);
-          addLog('stderr', `Claude: ${result.claudeError}`);
-          addLog('stderr', `Codex: ${result.codexError}`);
-          setPhase('error');
+          dispatch({type: 'phase', phase: 'error'});
           return;
         }
 
-        if (result.status === 'single_agent') {
-          addLog('stderr', `One agent failed: ${result.otherError}`);
-          addLog('stdout', `Proceeding with ${result.agentId} plan. Press Enter to continue or Ctrl+C to cancel.`);
-          setSelectedPlan(result.plan);
-          setPlanDisplay(JSON.stringify(result.plan, null, 2));
-          setPhase('awaiting_choice');
-          return;
-        }
-
-        if (result.status === 'aligned') {
-          addLog('stdout', 'Plans are aligned. Using Codex plan.');
-          setSelectedPlan(result.plan);
-          setPlanDisplay(JSON.stringify(result.plan, null, 2));
-          setPhase('awaiting_choice');
-          return;
-        }
-
-        if (result.status === 'parity_checked') {
-          const {parity} = result;
-          addLog('stdout', `Parity: ${parity.classification} — ${parity.reason}`);
-          if (parity.classification === 'materially_different') {
-            // Require an explicit plan or merge choice when parity finds a material difference.
-            setSelectedPlan(null);
-            addLog('stdout', 'Plans differ materially. Press 1 for Claude plan, 2 for Codex plan, m to auto-merge, Ctrl+C to cancel.');
-            setPlanDisplay(
-              `=== Claude Plan ===\n${JSON.stringify(result.claudePlan, null, 2)}\n\n=== Codex Plan ===\n${JSON.stringify(result.codexPlan, null, 2)}`
-            );
-            setPhase('awaiting_choice');
-          } else {
-            addLog('stdout', 'Plans are compatible. Using Codex plan. Press Enter to execute.');
-            setSelectedPlan(result.plan);
-            setPlanDisplay(JSON.stringify(result.plan, null, 2));
-            setPhase('awaiting_choice');
-          }
-        }
+        dispatch({type: 'phase', phase: 'awaiting_choice'});
       } catch (err) {
+        dispatch({type: 'split_finalize', promptId});
+        phaseStartRef.current = null;
         if ((err as Error).name !== 'AbortError') {
-          addLog('stderr', `Planning failed: ${String(err)}`);
-          setPhase('error');
+          addEntry({kind: 'system', text: `Planning failed: ${String(err)}`, level: 'error', ts: Date.now()});
+          dispatch({type: 'phase', phase: 'error'});
         }
       }
     },
-    [loadedConfig, addLog]
+    [loadedConfig, addEntry]
   );
 
   const startExecution = useCallback(
     async (plan: AgentPlan) => {
       if (!loadedConfig) return;
-      setPhase('executing');
-      addLog('stdout', 'Starting execution...');
+      dispatch({type: 'phase', phase: 'executing'});
+      phaseStartRef.current = Date.now();
+      addEntry({kind: 'system', text: 'Starting execution…', level: 'info', ts: Date.now()});
 
       const abort = new AbortController();
       abortRef.current = abort;
 
       try {
-        await runExecuteMode(loadedConfig, submittedPrompt, plan, {
+        await runExecuteMode(loadedConfig, state.submittedPrompt, plan, {
           abortSignal: abort.signal,
-          onEvent: makeProcessEventHandler('codex-exec'),
+          onEvent(ev) {
+            if (ev.type === 'output') {
+              const agentId = loadedConfig.config.workflow.executeAgent;
+              for (const fc of filterChunk(ev.data, agentId)) {
+                if (!fc.text.trim()) continue;
+                addEntry({kind: 'agent', agent: agentId, text: fc.text, level: fc.level, ts: Date.now()});
+              }
+            }
+          },
         });
-        addLog('stdout', 'Execution complete. Press r to review or Ctrl+C to exit.');
-        setPhase('done');
+        phaseStartRef.current = null;
+        addEntry({kind: 'system', text: 'Execution complete. /review to review or ↵ for new request.', level: 'info', ts: Date.now()});
+        dispatch({type: 'phase', phase: 'done'});
       } catch (err) {
+        phaseStartRef.current = null;
         if ((err as Error).name !== 'AbortError') {
-          addLog('stderr', `Execution failed: ${String(err)}`);
-          setPhase('error');
+          addEntry({kind: 'system', text: `Execution failed: ${String(err)}`, level: 'error', ts: Date.now()});
+          dispatch({type: 'phase', phase: 'error'});
         }
       }
     },
-    [loadedConfig, submittedPrompt, addLog, makeProcessEventHandler]
+    [loadedConfig, state.submittedPrompt, addEntry]
   );
 
   const startReview = useCallback(async () => {
     if (!loadedConfig) return;
-    setPhase('reviewing');
-    addLog('stdout', 'Starting review...');
+    dispatch({type: 'phase', phase: 'reviewing'});
+    phaseStartRef.current = Date.now();
+    addEntry({kind: 'system', text: 'Starting review…', level: 'info', ts: Date.now()});
 
     const abort = new AbortController();
     abortRef.current = abort;
@@ -169,25 +152,37 @@ export function App({loadedConfig, startupError}: AppProps): React.ReactElement 
     try {
       await runReviewMode(loadedConfig, {
         abortSignal: abort.signal,
-        onEvent: makeProcessEventHandler('codex-review'),
+        onEvent(ev) {
+          if (ev.type === 'output') {
+              const agentId = loadedConfig.config.workflow.reviewAgent;
+              for (const fc of filterChunk(ev.data, agentId)) {
+                if (!fc.text.trim()) continue;
+                addEntry({kind: 'agent', agent: agentId, text: fc.text, level: fc.level, ts: Date.now()});
+              }
+          }
+        },
       });
-      addLog('stdout', 'Review complete.');
-      setPhase('done');
+      phaseStartRef.current = null;
+      addEntry({kind: 'system', text: 'Review complete.', level: 'info', ts: Date.now()});
+      dispatch({type: 'phase', phase: 'done'});
     } catch (err) {
+      phaseStartRef.current = null;
       if ((err as Error).name !== 'AbortError') {
-        addLog('stderr', `Review failed: ${String(err)}`);
-        setPhase('error');
+        addEntry({kind: 'system', text: `Review failed: ${String(err)}`, level: 'error', ts: Date.now()});
+        dispatch({type: 'phase', phase: 'error'});
       }
     }
-  }, [loadedConfig, addLog, makeProcessEventHandler]);
+  }, [loadedConfig, addEntry]);
 
   const startPlanMerge = useCallback(async () => {
+    const {planResult} = state;
     if (!planResult || planResult.status !== 'parity_checked') return;
     if (!loadedConfig) return;
 
-    setPhase('planning');
+    dispatch({type: 'phase', phase: 'planning'});
+    phaseStartRef.current = Date.now();
     const mergeAgent = loadedConfig.config.workflow.mergeAgent;
-    addLog('stdout', `Starting auto-merge with ${mergeAgent}...`);
+    addEntry({kind: 'system', text: `Starting auto-merge with ${mergeAgent}…`, level: 'info', ts: Date.now()});
 
     const abort = new AbortController();
     abortRef.current = abort;
@@ -195,22 +190,30 @@ export function App({loadedConfig, startupError}: AppProps): React.ReactElement 
     try {
       const mergedPlan = await runPlanMergeMode(loadedConfig, planResult.claudePlan, planResult.codexPlan, {
         abortSignal: abort.signal,
-        onEvent: makeProcessEventHandler(`${mergeAgent}-merge`),
+        onEvent(ev) {
+          if (ev.type === 'output') {
+            for (const fc of filterChunk(ev.data, mergeAgent)) {
+              if (!fc.text.trim()) continue;
+              addEntry({kind: 'agent', agent: mergeAgent, text: fc.text, level: fc.level, ts: Date.now()});
+            }
+          }
+        },
       });
-
-      // Select the merged plan so Enter executes it after the merge preview is shown.
-      setSelectedPlan(mergedPlan);
-      setPlanDisplay(JSON.stringify(mergedPlan, null, 2));
-      addLog('stdout', 'Auto-merge complete. Press Enter to execute the merged plan, or choose 1/2 to override.');
-      setPhase('awaiting_choice');
+      phaseStartRef.current = null;
+      dispatch({type: 'select_plan', plan: mergedPlan});
+      addEntry({kind: 'plan', plan: mergedPlan, source: 'merged', ts: Date.now()});
+      addEntry({kind: 'system', text: 'Auto-merge complete. Press Enter to execute, or 1/2 to override.', level: 'info', ts: Date.now()});
+      dispatch({type: 'phase', phase: 'awaiting_choice'});
     } catch (err) {
+      phaseStartRef.current = null;
       if ((err as Error).name !== 'AbortError') {
-        addLog('stderr', `Auto-merge failed: ${String(err)}`);
-        setPhase('awaiting_choice');
+        addEntry({kind: 'system', text: `Auto-merge failed: ${String(err)}`, level: 'error', ts: Date.now()});
+        dispatch({type: 'phase', phase: 'awaiting_choice'});
       }
     }
-  }, [loadedConfig, planResult, addLog, makeProcessEventHandler]);
+  }, [loadedConfig, state, addEntry]);
 
+  // Global key bindings (outside composer input)
   useInput((input, key) => {
     if (key.ctrl && input === 'c') {
       abortRef.current?.abort();
@@ -218,20 +221,20 @@ export function App({loadedConfig, startupError}: AppProps): React.ReactElement 
       return;
     }
 
+    const {phase, planResult, selectedPlan, activeSplitId} = state;
+
     if (phase === 'awaiting_choice') {
       if (input === '1' && planResult?.status === 'parity_checked') {
         const plan = planResult.claudePlan;
-        setSelectedPlan(plan);
-        setPlanDisplay(JSON.stringify(plan, null, 2));
-        addLog('stdout', 'Using Claude plan.');
+        dispatch({type: 'select_plan', plan});
+        addEntry({kind: 'system', text: 'Using Claude plan.', level: 'info', ts: Date.now()});
         startExecution(plan);
         return;
       }
       if (input === '2' && planResult?.status === 'parity_checked') {
         const plan = planResult.codexPlan;
-        setSelectedPlan(plan);
-        setPlanDisplay(JSON.stringify(plan, null, 2));
-        addLog('stdout', 'Using Codex plan.');
+        dispatch({type: 'select_plan', plan});
+        addEntry({kind: 'system', text: 'Using Codex plan.', level: 'info', ts: Date.now()});
         startExecution(plan);
         return;
       }
@@ -245,58 +248,108 @@ export function App({loadedConfig, startupError}: AppProps): React.ReactElement 
       }
     }
 
-    if (phase === 'done' && input === 'r') {
-      startReview();
+    // Toggle diagnostics fold
+    if (input === 'D') {
+      setShowDiag((v) => !v);
+      return;
+    }
+
+    // Expand/collapse active split
+    if (input === 'd' && activeSplitId) {
+      dispatch({type: 'split_toggle', promptId: activeSplitId});
       return;
     }
   });
 
   const handleSubmit = useCallback(
-    (value: string) => {
-      const trimmed = value.trim();
-      if (!trimmed || phase !== 'idle') return;
-      setSubmittedPrompt(trimmed);
-      setPrompt('');
-      startPlanning(trimmed);
+    (text: string) => {
+      if (state.phase !== 'idle' && state.phase !== 'done') return;
+      // Reset to idle if coming from done with a new prompt
+      if (state.phase === 'done') {
+        dispatch({type: 'phase', phase: 'idle'});
+      }
+      startPlanning(text);
     },
-    [phase, startPlanning]
+    [state.phase, startPlanning]
   );
 
-  const activeAgents = Object.keys(loadedConfig?.config.agents ?? {});
+  const handleCommand = useCallback(
+    (name: string, args: string) => {
+      switch (name) {
+        case '/help':
+          addEntry({
+            kind: 'system',
+            text: 'Commands: /plan /execute /review /diff /clear /help /quit /diag',
+            level: 'info',
+            ts: Date.now(),
+          });
+          break;
+        case '/clear':
+          dispatch({type: 'clear'});
+          break;
+        case '/quit':
+          exit();
+          break;
+        case '/review':
+          startReview();
+          break;
+        case '/execute':
+          if (state.selectedPlan) startExecution(state.selectedPlan);
+          else addEntry({kind: 'system', text: 'No plan selected. Run a planning request first.', level: 'warn', ts: Date.now()});
+          break;
+        case '/plan':
+          if (args.trim()) {
+            dispatch({type: 'draft', text: ''});
+            dispatch({type: 'append', entry: {kind: 'user', text: args.trim(), ts: Date.now()}});
+            dispatch({type: 'phase', phase: 'idle'});
+            startPlanning(args.trim());
+          }
+          break;
+        case '/diag':
+          setShowDiag((v) => !v);
+          break;
+        case '/diff':
+          addEntry({kind: 'system', text: 'Use d to expand/collapse the active split block.', level: 'info', ts: Date.now()});
+          break;
+        default:
+          addEntry({kind: 'system', text: `Unknown command: ${name}`, level: 'warn', ts: Date.now()});
+      }
+    },
+    [state.selectedPlan, addEntry, startReview, startExecution, startPlanning, exit]
+  );
 
-  const phaseLabel: Record<Phase, string> = {
-    idle: 'idle — enter a request',
-    planning: 'planning',
-    awaiting_choice: 'awaiting choice',
-    executing: 'executing',
-    reviewing: 'reviewing',
-    done: 'done',
-    error: 'error',
-  };
-  // Treat only agent-running phases as active work for the status animation.
-  const isBusy = phase === 'planning' || phase === 'executing' || phase === 'reviewing';
+  // Split finalized entries (for Static) from the active split (for dynamic region)
+  const {activeSplitId, entries, phase} = state;
+
+  const activeEntry = activeSplitId
+    ? (entries.find(
+        (e) => e.kind === 'prompt_split' && e.promptId === activeSplitId
+      ) as Extract<TranscriptEntry, {kind: 'prompt_split'}> | undefined) ?? null
+    : null;
+
+  const finalizedEntries = activeSplitId
+    ? entries.filter((e) => !(e.kind === 'prompt_split' && e.promptId === activeSplitId))
+    : entries;
+
+  const composerDisabled = phase === 'planning' || phase === 'executing' || phase === 'reviewing';
 
   return (
-    <Box flexDirection="column" paddingX={1}>
-      <StatusBar
-        phase={phaseLabel[phase]}
-        targetCwd={loadedConfig?.targetCwd ?? process.cwd()}
-        repoRoot={loadedConfig?.repoRoot}
-        activeAgents={activeAgents}
-        isBusy={isBusy}
+    <Box flexDirection="column">
+      <Banner loadedConfig={loadedConfig} />
+      <Transcript
+        finalizedEntries={finalizedEntries}
+        activeEntry={activeEntry}
+        showDiag={showDiag}
       />
-      <Box marginTop={1}>
-        <PlanPane selectedPlan={planDisplay} />
-      </Box>
-      <Box marginTop={1}>
-        <AgentPane logs={logs} />
-      </Box>
-      {(phase === 'idle' || phase === 'done') && (
-        <Box marginTop={1}>
-          <InputRow value={prompt} onChange={setPrompt} onSubmit={handleSubmit} />
-        </Box>
-      )}
-      <Footer phase={phase} />
+      <Spinner phase={phase} startedAt={phaseStartRef.current} />
+      <Composer
+        draft={state.draft}
+        dispatch={dispatch}
+        onSubmit={handleSubmit}
+        onCommand={handleCommand}
+        disabled={composerDisabled}
+      />
+      <HintStrip phase={phase} commandMode={isCommandMode(state.draft)} />
     </Box>
   );
 }

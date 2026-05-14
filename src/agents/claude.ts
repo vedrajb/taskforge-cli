@@ -58,15 +58,41 @@ function buildStreamingOnEvent(
   };
 }
 
+function extractFirstJson(text: string): unknown {
+  const start = text.indexOf('{');
+  const end = text.lastIndexOf('}');
+  if (start === -1 || end === -1 || end <= start) {
+    throw new Error('No JSON object found in text');
+  }
+  return JSON.parse(text.slice(start, end + 1));
+}
+
 function extractResultFromLines(lines: string[]): unknown {
+  // Pass 1: dedicated result event (claude --output-format stream-json emits this at the end).
+  // Parse the outer event and inner result string separately so a bad JSON.parse on the
+  // result text does not silently swallow the event and report the wrong error.
   for (const line of lines) {
-    try {
-      const ev = JSON.parse(line) as StreamEvent;
-      if (ev['type'] === 'result' && typeof ev['result'] === 'string') {
-        return JSON.parse(ev['result'] as string);
+    let ev: StreamEvent;
+    try { ev = JSON.parse(line) as StreamEvent; } catch { continue; }
+    if (ev['type'] === 'result' && typeof ev['result'] === 'string') {
+      // extractFirstJson handles responses that wrap JSON in markdown code fences.
+      return extractFirstJson(ev['result'] as string);
+    }
+  }
+  // Pass 2: fallback — scan assistant message content blocks in case the CLI version
+  // does not emit a separate result event.
+  for (const line of lines) {
+    let ev: StreamEvent;
+    try { ev = JSON.parse(line) as StreamEvent; } catch { continue; }
+    if (ev['type'] === 'assistant') {
+      const msg = ev['message'] as {content?: Array<{type: string; text?: string}>} | undefined;
+      const text = msg?.content
+        ?.filter((c) => c.type === 'text')
+        .map((c) => c.text ?? '')
+        .join('');
+      if (text) {
+        try { return extractFirstJson(text); } catch { /* keep scanning */ }
       }
-    } catch {
-      // keep looking
     }
   }
   throw new Error('No result event found in claude stream-json output');
