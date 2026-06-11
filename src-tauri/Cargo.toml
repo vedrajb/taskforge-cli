@@ -1,0 +1,14 @@
+[package]
+name = "taskforge-desktop"
+version = "0.1.0"
+description = "TaskForge desktop shell"
+authors = ["TaskForge"]
+edition = "2021"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+tauri = { version = "2", features = [] }
+tauri-plugin-shell = "2"

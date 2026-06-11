@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 
-import {main} from './app.js';
+import {launchTaskForge} from './desktop/launcher.js';
 
-main(process.argv).catch((error: unknown) => {
+launchTaskForge(process.argv).catch((error: unknown) => {
   const message = error instanceof Error ? error.message : String(error);
   process.stderr.write(`taskforge failed: ${message}\n`);
   process.exitCode = 1;

@@ -1,0 +1,30 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "TaskForge",
+  "version": "0.1.0",
+  "identifier": "dev.taskforge.app",
+  "build": {
+    "beforeDevCommand": "npm run desktop:web:dev",
+    "beforeBuildCommand": "npm run desktop:web:build",
+    "devUrl": "http://localhost:5173",
+    "frontendDist": "../desktop/dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "TaskForge",
+        "width": 1180,
+        "height": 820,
+        "minWidth": 760,
+        "minHeight": 560
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all"
+  }
+}

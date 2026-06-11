@@ -1,5 +1,8 @@
 node_modules/
 dist/
+desktop/dist/
+src-tauri/target/
+src-tauri/gen/
 .env
 .taskforge/
 npm-debug.log*
