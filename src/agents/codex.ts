@@ -1,5 +1,6 @@
 import {AgentPlan, AgentPlanSchema, AGENT_PLAN_SCHEMA_DESCRIPTION} from './types.js';
-import {runProcess, RunProcessOptions} from './runProcess.js';
+import {acpxRun, AcpxRunOptions} from './acpxAgent.js';
+import {RunProcessOptions} from './runProcess.js';
 
 function extractFirstJson(text: string): unknown {
   const start = text.indexOf('{');
@@ -39,115 +40,68 @@ function buildMergePrompt(planA: AgentPlan, planB: AgentPlan): string {
   );
 }
 
-// Prompt is read from stdin ('-' is the default when stdin is piped) to avoid
-// shell quoting issues on Windows where shell: true is required for .cmd shims.
+function buildReviewPrompt(): string {
+  return (
+    `Review the uncommitted changes in the current workspace.\n` +
+    `Check for bugs, security issues, code quality problems, and missing tests.\n` +
+    `Provide a concise, actionable summary of findings.`
+  );
+}
+
+function toAcpxOptions(options: RunProcessOptions): AcpxRunOptions {
+  return {
+    cwd: options.cwd ?? process.cwd(),
+    signal: options.signal,
+    onEvent(ev) {
+      if (ev.type === 'text_delta' && ev.stream === 'output') {
+        options.onEvent?.({type: 'output', stream: 'stdout', data: ev.text});
+      } else if (ev.type === 'done') {
+        options.onEvent?.({type: 'exit', code: 0, signal: null});
+      } else if (ev.type === 'error') {
+        options.onEvent?.({type: 'exit', code: 1, signal: null});
+      }
+    },
+  };
+}
 
 export async function codexPlan(
   command: string,
   userRequest: string,
-  effort: string,
+  _effort: string,
   options: RunProcessOptions = {}
 ): Promise<AgentPlan> {
   const prompt = buildPlanPrompt(userRequest);
-  const chunks: string[] = [];
-  const wrappedOnEvent = options.onEvent;
-
-  const proc = runProcess(
-    command,
-    ['exec', '--skip-git-repo-check', '-c', `reasoning_effort="${effort}"`],
-    {
-      ...options,
-      stdinPayload: prompt,
-      onEvent(event) {
-        if (event.type === 'output' && event.stream === 'stdout') {
-          chunks.push(event.data);
-        }
-        wrappedOnEvent?.(event);
-      },
-    }
-  );
-
-  const exit = await proc.completion;
-  if (exit.type === 'exit' && exit.code !== 0) {
-    throw new Error(`codex exited with code ${exit.code}`);
-  }
-
-  const raw = chunks.join('');
-  const parsed = extractFirstJson(raw);
-  return AgentPlanSchema.parse(parsed);
+  const text = await acpxRun(command, prompt, toAcpxOptions(options));
+  return AgentPlanSchema.parse(extractFirstJson(text));
 }
 
 export async function codexExecute(
   command: string,
   userRequest: string,
   plan: AgentPlan,
-  effort: string,
+  _effort: string,
   options: RunProcessOptions = {}
 ): Promise<void> {
   const prompt = buildExecutePrompt(userRequest, plan);
-
-  const proc = runProcess(
-    command,
-    ['exec', '-c', `reasoning_effort="${effort}"`],
-    {
-      ...options,
-      stdinPayload: prompt,
-    }
-  );
-
-  const exit = await proc.completion;
-  if (exit.type === 'exit' && exit.code !== 0) {
-    throw new Error(`codex exec exited with code ${exit.code}`);
-  }
+  await acpxRun(command, prompt, toAcpxOptions(options));
 }
 
 export async function codexMergePlan(
   command: string,
   planA: AgentPlan,
   planB: AgentPlan,
-  effort: string,
+  _effort: string,
   options: RunProcessOptions = {}
 ): Promise<AgentPlan> {
   const prompt = buildMergePrompt(planA, planB);
-  const chunks: string[] = [];
-  const wrappedOnEvent = options.onEvent;
-
-  // Capture stdout for JSON parsing while still forwarding process output live.
-  const proc = runProcess(
-    command,
-    ['exec', '--skip-git-repo-check', '-c', `reasoning_effort="${effort}"`],
-    {
-      ...options,
-      stdinPayload: prompt,
-      onEvent(event) {
-        if (event.type === 'output' && event.stream === 'stdout') {
-          chunks.push(event.data);
-        }
-        wrappedOnEvent?.(event);
-      },
-    }
-  );
-
-  const exit = await proc.completion;
-  if (exit.type === 'exit' && exit.code !== 0) {
-    throw new Error(`codex exited with code ${exit.code}`);
-  }
-
-  const raw = chunks.join('');
-  const parsed = extractFirstJson(raw);
-  return AgentPlanSchema.parse(parsed);
+  const text = await acpxRun(command, prompt, toAcpxOptions(options));
+  return AgentPlanSchema.parse(extractFirstJson(text));
 }
 
 export async function codexReview(
   command: string,
   options: RunProcessOptions = {}
 ): Promise<void> {
-  const proc = runProcess(command, ['exec', 'review', '--uncommitted'], {
-    ...options,
-  });
-
-  const exit = await proc.completion;
-  if (exit.type === 'exit' && exit.code !== 0) {
-    throw new Error(`codex review exited with code ${exit.code}`);
-  }
+  const prompt = buildReviewPrompt();
+  await acpxRun(command, prompt, toAcpxOptions(options));
 }

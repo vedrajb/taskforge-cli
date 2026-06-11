@@ -6,57 +6,8 @@ import {
   AGENT_PLAN_SCHEMA_DESCRIPTION,
   PLAN_PARITY_SCHEMA_DESCRIPTION,
 } from './types.js';
-import {runProcess, RunProcessOptions, ProcessRunnerEvent} from './runProcess.js';
-
-// stream-json emits newline-delimited JSON events. Each line is one of:
-//   {"type":"system", ...}
-//   {"type":"assistant","message":{"content":[{"type":"text","text":"..."}],...},...}
-//   {"type":"result","result":"<escaped JSON string>",...}
-// We forward assistant text chunks live and extract the result at the end.
-
-type StreamEvent = Record<string, unknown>;
-
-function buildStreamingOnEvent(
-  wrappedOnEvent: RunProcessOptions['onEvent'],
-  collectedLines: string[]
-): RunProcessOptions['onEvent'] {
-  let remainder = '';
-
-  return (event: ProcessRunnerEvent) => {
-    if (event.type !== 'output' || event.stream !== 'stdout') {
-      wrappedOnEvent?.(event);
-      return;
-    }
-
-    const lines = (remainder + event.data).split('\n');
-    remainder = lines.pop() ?? '';
-
-    for (const line of lines) {
-      const trimmed = line.trim();
-      if (!trimmed) continue;
-      collectedLines.push(trimmed);
-
-      let ev: StreamEvent;
-      try {
-        ev = JSON.parse(trimmed) as StreamEvent;
-      } catch {
-        wrappedOnEvent?.({type: 'output', stream: 'stdout', data: line});
-        continue;
-      }
-
-      if (ev['type'] === 'assistant') {
-        const msg = ev['message'] as {content?: Array<{type: string; text?: string}>} | undefined;
-        const text = msg?.content
-          ?.filter((c) => c.type === 'text')
-          .map((c) => c.text ?? '')
-          .join('');
-        if (text) {
-          wrappedOnEvent?.({type: 'output', stream: 'stdout', data: text});
-        }
-      }
-    }
-  };
-}
+import {acpxRun, AcpxRunOptions} from './acpxAgent.js';
+import {RunProcessOptions} from './runProcess.js';
 
 function extractFirstJson(text: string): unknown {
   const start = text.indexOf('{');
@@ -65,37 +16,6 @@ function extractFirstJson(text: string): unknown {
     throw new Error('No JSON object found in text');
   }
   return JSON.parse(text.slice(start, end + 1));
-}
-
-function extractResultFromLines(lines: string[]): unknown {
-  // Pass 1: dedicated result event (claude --output-format stream-json emits this at the end).
-  // Parse the outer event and inner result string separately so a bad JSON.parse on the
-  // result text does not silently swallow the event and report the wrong error.
-  for (const line of lines) {
-    let ev: StreamEvent;
-    try { ev = JSON.parse(line) as StreamEvent; } catch { continue; }
-    if (ev['type'] === 'result' && typeof ev['result'] === 'string') {
-      // extractFirstJson handles responses that wrap JSON in markdown code fences.
-      return extractFirstJson(ev['result'] as string);
-    }
-  }
-  // Pass 2: fallback — scan assistant message content blocks in case the CLI version
-  // does not emit a separate result event.
-  for (const line of lines) {
-    let ev: StreamEvent;
-    try { ev = JSON.parse(line) as StreamEvent; } catch { continue; }
-    if (ev['type'] === 'assistant') {
-      const msg = ev['message'] as {content?: Array<{type: string; text?: string}>} | undefined;
-      const text = msg?.content
-        ?.filter((c) => c.type === 'text')
-        .map((c) => c.text ?? '')
-        .join('');
-      if (text) {
-        try { return extractFirstJson(text); } catch { /* keep scanning */ }
-      }
-    }
-  }
-  throw new Error('No result event found in claude stream-json output');
 }
 
 function effortNote(effort: string): string {
@@ -135,8 +55,21 @@ function buildMergePrompt(planA: AgentPlan, planB: AgentPlan, effort: string): s
   );
 }
 
-// Prompt is passed via stdin ('-') to avoid any shell quoting issues on Windows.
-const CLAUDE_BASE_ARGS = ['-p', '--verbose', '--output-format', 'stream-json', '-'];
+function toAcpxOptions(options: RunProcessOptions): AcpxRunOptions {
+  return {
+    cwd: options.cwd ?? process.cwd(),
+    signal: options.signal,
+    onEvent(ev) {
+      if (ev.type === 'text_delta' && ev.stream === 'output') {
+        options.onEvent?.({type: 'output', stream: 'stdout', data: ev.text});
+      } else if (ev.type === 'done') {
+        options.onEvent?.({type: 'exit', code: 0, signal: null});
+      } else if (ev.type === 'error') {
+        options.onEvent?.({type: 'exit', code: 1, signal: null});
+      }
+    },
+  };
+}
 
 export async function claudePlan(
   command: string,
@@ -145,21 +78,8 @@ export async function claudePlan(
   options: RunProcessOptions = {}
 ): Promise<AgentPlan> {
   const prompt = buildPlanPrompt(userRequest, effort);
-  const collectedLines: string[] = [];
-
-  const proc = runProcess(command, CLAUDE_BASE_ARGS, {
-    ...options,
-    stdinPayload: prompt,
-    onEvent: buildStreamingOnEvent(options.onEvent, collectedLines),
-  });
-
-  const exit = await proc.completion;
-  if (exit.type === 'exit' && exit.code !== 0) {
-    throw new Error(`claude exited with code ${exit.code}`);
-  }
-
-  const result = extractResultFromLines(collectedLines);
-  return AgentPlanSchema.parse(result);
+  const text = await acpxRun(command, prompt, toAcpxOptions(options));
+  return AgentPlanSchema.parse(extractFirstJson(text));
 }
 
 export async function claudeParity(
@@ -170,21 +90,8 @@ export async function claudeParity(
   options: RunProcessOptions = {}
 ): Promise<PlanParity> {
   const prompt = buildParityPrompt(planA, planB, effort);
-  const collectedLines: string[] = [];
-
-  const proc = runProcess(command, CLAUDE_BASE_ARGS, {
-    ...options,
-    stdinPayload: prompt,
-    onEvent: buildStreamingOnEvent(options.onEvent, collectedLines),
-  });
-
-  const exit = await proc.completion;
-  if (exit.type === 'exit' && exit.code !== 0) {
-    throw new Error(`claude exited with code ${exit.code}`);
-  }
-
-  const result = extractResultFromLines(collectedLines);
-  return PlanParitySchema.parse(result);
+  const text = await acpxRun(command, prompt, toAcpxOptions(options));
+  return PlanParitySchema.parse(extractFirstJson(text));
 }
 
 export async function claudeMergePlan(
@@ -195,20 +102,6 @@ export async function claudeMergePlan(
   options: RunProcessOptions = {}
 ): Promise<AgentPlan> {
   const prompt = buildMergePrompt(planA, planB, effort);
-  const collectedLines: string[] = [];
-
-  // Reuse Claude stream-json parsing so live assistant text still reaches the TUI.
-  const proc = runProcess(command, CLAUDE_BASE_ARGS, {
-    ...options,
-    stdinPayload: prompt,
-    onEvent: buildStreamingOnEvent(options.onEvent, collectedLines),
-  });
-
-  const exit = await proc.completion;
-  if (exit.type === 'exit' && exit.code !== 0) {
-    throw new Error(`claude exited with code ${exit.code}`);
-  }
-
-  const result = extractResultFromLines(collectedLines);
-  return AgentPlanSchema.parse(result);
+  const text = await acpxRun(command, prompt, toAcpxOptions(options));
+  return AgentPlanSchema.parse(extractFirstJson(text));
 }

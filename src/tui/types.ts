@@ -57,6 +57,7 @@ export type AppAction =
   | {type: 'submit'}
   | {type: 'plan_result'; result: PlanModeResult; selectedPlan: AgentPlan | null}
   | {type: 'select_plan'; plan: AgentPlan}
+  | {type: 'cancel_plan_choice'}
   | {type: 'clear'}
   | {type: 'split_start'; promptId: string; phase: 'planning' | 'review'; agentIds: string[]}
   | {type: 'split_append'; promptId: string; agentId: string; chunk: string; stream: 'stdout' | 'stderr'; exitCode?: number; level?: LogLevel}

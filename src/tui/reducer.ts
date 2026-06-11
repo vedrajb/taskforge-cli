@@ -66,6 +66,10 @@ export function reducer(state: AppState, action: AppAction): AppState {
     case 'select_plan':
       return {...state, selectedPlan: action.plan};
 
+    case 'cancel_plan_choice':
+      // Clear the pending plan decision so Enter cannot execute a stale selection.
+      return {...state, phase: 'idle', planResult: null, selectedPlan: null};
+
     case 'clear':
       return {
         ...state,
@@ -209,7 +213,7 @@ export function planResultToEntries(result: PlanModeResult): {
     if (parity.classification === 'materially_different') {
       entries.push({
         kind: 'system',
-        text: 'Plans differ. Press 1=Claude  2=Codex  m=auto-merge  Ctrl+C=cancel.',
+        text: 'Plans differ. Press 1=Claude  2=Codex  m=auto-merge  Esc=cancel.',
         level: 'warn',
         ts: ts + 1,
       });

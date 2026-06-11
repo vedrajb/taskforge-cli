@@ -12,13 +12,12 @@
     "test": "node --test --import tsx tests/agents.test.ts"
   },
   "dependencies": {
-    "ink": "^5.0.1",
-    "react": "^18.2.0",
+    "@mariozechner/pi-tui": "^0.73.1",
+    "acpx": "^0.7.0",
     "zod": "^3.23.8"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",
-    "@types/react": "^18.3.12",
     "tsx": "^4.19.2",
     "typescript": "^5.7.2"
   }
