@@ -84,6 +84,18 @@ function padToWidth(text: string, width: number): string {
   return text + ' '.repeat(width - w);
 }
 
+function wrapIndented(text: string, indent: string, width = 100): string[] {
+  // Wrap each logical line after reserving space for its display indent.
+  const bodyWidth = Math.max(20, width - visibleWidth(indent));
+  const lines = text.split('\n');
+  const out: string[] = [];
+  for (const line of lines) {
+    const wrapped = line ? wrapTextWithAnsi(line, bodyWidth) : [''];
+    for (const row of wrapped) out.push(indent + row);
+  }
+  return out;
+}
+
 /**
  * RawLines: a pi-tui component that emits a fixed set of pre-rendered lines.
  * Unlike Markdown/Text it does NOT wrap, parse, or reflow content; it only
@@ -129,12 +141,7 @@ function renderEntryLines(entry: TranscriptEntry): string[] {
     }
 
     case 'plan': {
-      const out: string[] = [];
-      out.push(' ' + color(ANSI.plan, 'plan   › ') + color(ANSI.gray, `[${entry.source}] `) + entry.plan.goal);
-      for (let i = 0; i < entry.plan.steps.length; i++) {
-        out.push('          ' + color(ANSI.gray, `${i + 1}. ${entry.plan.steps[i]!.title}`));
-      }
-      return out;
+      return renderPlanLines(entry, 100);
     }
 
     case 'parity': {
@@ -155,6 +162,38 @@ function renderEntryLines(entry: TranscriptEntry): string[] {
     default:
       return [];
   }
+}
+
+function renderPlanLines(entry: Extract<TranscriptEntry, {kind: 'plan'}>, width: number): string[] {
+  const out: string[] = [];
+  out.push(
+    ' '
+    + color(ANSI.plan, 'plan   › ')
+    + color(ANSI.gray, `[${entry.source}] `)
+    + entry.plan.goal
+  );
+
+  out.push(...wrapIndented(color(ANSI.gray, 'summary: ') + entry.plan.summary, '          ', width));
+  for (let i = 0; i < entry.plan.steps.length; i++) {
+    const step = entry.plan.steps[i]!;
+    out.push('          ' + color(ANSI.gray, `${i + 1}. `) + color(ANSI.bold, step.title));
+    out.push(...wrapIndented(step.detail, '             ', width));
+    if (step.files?.length) {
+      out.push(...wrapIndented(color(ANSI.gray, 'files: ') + step.files.join(', '), '             ', width));
+    }
+    if (step.risks?.length) {
+      out.push(...wrapIndented(color(ANSI.warn, 'step risks: ') + step.risks.join('; '), '             ', width));
+    }
+  }
+  if (entry.plan.risks.length) {
+    out.push('          ' + color(ANSI.warn, 'risks'));
+    for (const risk of entry.plan.risks) out.push(...wrapIndented(`- ${risk}`, '             ', width));
+  }
+  if (entry.plan.openQuestions.length) {
+    out.push('          ' + color(ANSI.warn, 'open questions'));
+    for (const question of entry.plan.openQuestions) out.push(...wrapIndented(`- ${question}`, '             ', width));
+  }
+  return out;
 }
 
 function colorForAgent(id: string): string {
