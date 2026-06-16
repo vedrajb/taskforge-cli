@@ -211,11 +211,14 @@ export function planResultToEntries(result: PlanModeResult): {
       ts,
     });
     if (parity.classification === 'materially_different') {
+      // Show both competing plans before asking the user to choose one.
+      entries.push({kind: 'plan', plan: result.claudePlan, source: 'claude', ts: ts + 1});
+      entries.push({kind: 'plan', plan: result.codexPlan, source: 'codex', ts: ts + 2});
       entries.push({
         kind: 'system',
-        text: 'Plans differ. Press 1=Claude  2=Codex  m=auto-merge  Esc=cancel.',
+        text: 'Plans differ. Both plans shown above. Press 1=Claude  2=Codex  m=auto-merge  Esc=cancel.',
         level: 'warn',
-        ts: ts + 1,
+        ts: ts + 3,
       });
     } else {
       entries.push({kind: 'plan', plan: result.plan, source: 'codex', ts: ts + 1});
