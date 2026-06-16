@@ -1,5 +1,6 @@
 import {execFile} from 'node:child_process';
 import {promises as fs} from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import {promisify} from 'node:util';
 import {TaskForgeConfig, TaskForgeConfigSchema} from './schema.js';
@@ -7,11 +8,14 @@ import {createDefaultConfig} from './defaultConfig.js';
 
 const execFileAsync = promisify(execFile);
 export const DEFAULT_CONFIG_FILE = 'taskforge.config.json';
+export const GLOBAL_CONFIG_FILE = path.join(os.homedir(), '.config', 'settings.json');
 
 export type LoadedConfig = {
   config: TaskForgeConfig;
   configPath: string;
-  configSource: 'workspace' | 'default';
+  configSource: 'workspace' | 'global' | 'default';
+  rawConfig: string;
+  effectiveConfigJson: string;
   repoRoot: string;
   targetCwd: string;
   workspaceRoot: string;
@@ -27,13 +31,16 @@ export type LoadConfigOptions = {
 
 export async function loadConfig(options: LoadConfigOptions = {}): Promise<LoadedConfig> {
   const cwd = path.resolve(options.cwd ?? process.cwd());
-  const configPath = path.resolve(cwd, options.configPath ?? DEFAULT_CONFIG_FILE);
+  const workspaceConfigPath = path.resolve(cwd, options.configPath ?? DEFAULT_CONFIG_FILE);
 
   // Desktop launches should open anywhere; the TUI keeps the historical strict Git check.
   const workspaceRepoRoot = await resolveGitRepository(cwd, options.allowMissingGit ?? false);
 
   // Parse and validate the config before deriving runtime paths from it.
-  const {config, source} = await readConfigFile(configPath, options.allowMissingConfig ?? false);
+  const {config, source, configPath, rawConfig} = await readConfigFile(
+    workspaceConfigPath,
+    options.allowMissingConfig ?? false
+  );
   const targetCwd = path.resolve(cwd, config.target.cwd);
   const targetRepoRoot = await resolveGitRepository(targetCwd, options.allowMissingGit ?? false);
   const repoRoot = targetRepoRoot || workspaceRepoRoot;
@@ -42,6 +49,8 @@ export async function loadConfig(options: LoadConfigOptions = {}): Promise<Loade
     config,
     configPath,
     configSource: source,
+    rawConfig,
+    effectiveConfigJson: JSON.stringify(config, null, 2),
     repoRoot,
     targetCwd,
     workspaceRoot: cwd,
@@ -50,24 +59,44 @@ export async function loadConfig(options: LoadConfigOptions = {}): Promise<Loade
 }
 
 async function readConfigFile(
-  configPath: string,
+  workspaceConfigPath: string,
   allowMissingConfig: boolean
-): Promise<{config: TaskForgeConfig; source: LoadedConfig['configSource']}> {
-  let rawConfig: string;
-
-  // Load the JSON config explicitly so missing-file errors can name the expected path.
-  try {
-    rawConfig = await fs.readFile(configPath, 'utf8');
-  } catch (error: unknown) {
-    if (isNodeError(error) && error.code === 'ENOENT') {
-      if (allowMissingConfig) {
-        return {config: createDefaultConfig(), source: 'default'};
-      }
-      throw new Error(`Missing TaskForge config: ${configPath}`);
-    }
-    throw error;
+): Promise<{config: TaskForgeConfig; source: LoadedConfig['configSource']; configPath: string; rawConfig: string}> {
+  // Try workspace first, then global settings, then bundled defaults if allowed.
+  const workspace = await tryReadConfigFile(workspaceConfigPath);
+  if (workspace) {
+    return {...parseConfigJson(workspace.rawConfig, workspace.path), source: 'workspace', configPath: workspace.path};
   }
 
+  const global = await tryReadConfigFile(GLOBAL_CONFIG_FILE);
+  if (global) {
+    return {...parseConfigJson(global.rawConfig, global.path), source: 'global', configPath: global.path};
+  }
+
+  if (allowMissingConfig) {
+    const config = createDefaultConfig();
+    return {
+      config,
+      source: 'default',
+      configPath: GLOBAL_CONFIG_FILE,
+      rawConfig: JSON.stringify(config, null, 2),
+    };
+  }
+
+  throw new Error(`Missing TaskForge config: ${workspaceConfigPath} or ${GLOBAL_CONFIG_FILE}`);
+}
+
+async function tryReadConfigFile(configPath: string): Promise<{path: string; rawConfig: string} | null> {
+  // Missing config files are normal during fallback probing.
+  try {
+    return {path: configPath, rawConfig: await fs.readFile(configPath, 'utf8')};
+  } catch (error: unknown) {
+    if (isNodeError(error) && error.code === 'ENOENT') return null;
+    throw error;
+  }
+}
+
+function parseConfigJson(rawConfig: string, configPath: string): {config: TaskForgeConfig; rawConfig: string} {
   // Keep JSON parsing separate from schema validation for clearer startup failures.
   let parsedConfig: unknown;
   try {
@@ -77,7 +106,15 @@ async function readConfigFile(
     throw new Error(`Invalid JSON in ${configPath}: ${message}`);
   }
 
-  return {config: TaskForgeConfigSchema.parse(parsedConfig), source: 'workspace'};
+  return {config: TaskForgeConfigSchema.parse(parsedConfig), rawConfig};
+}
+
+export async function validateAndWriteConfig(rawConfig: string, configPath: string): Promise<TaskForgeConfig> {
+  // Validate before writing so bad JSON never replaces a working settings file.
+  const {config} = parseConfigJson(rawConfig, configPath);
+  await fs.mkdir(path.dirname(configPath), {recursive: true});
+  await fs.writeFile(configPath, rawConfig, 'utf8');
+  return config;
 }
 
 async function assertGitRepository(cwd: string): Promise<string> {

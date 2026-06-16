@@ -10,6 +10,7 @@ type WorkerRequest =
   | {id?: string; type: 'review'}
   | {id?: string; type: 'cancel'}
   | {id?: string; type: 'clear'}
+  | {id?: string; type: 'saveSettings'; rawJson: string}
   | {id?: string; type: 'snapshot'};
 
 type WorkerResponse =
@@ -78,6 +79,9 @@ async function handleRequest(request: WorkerRequest): Promise<void> {
         break;
       case 'clear':
         activeSession.clear();
+        break;
+      case 'saveSettings':
+        await activeSession.saveSettings(request.rawJson);
         break;
       case 'snapshot':
         writeResponse({type: 'event', event: {type: 'state', snapshot: activeSession.snapshot()}});

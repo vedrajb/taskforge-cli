@@ -1,7 +1,7 @@
 import {useCallback, useEffect, useMemo, useRef, useState} from 'react';
 import {invoke} from '@tauri-apps/api/core';
 import {Command, type Child} from '@tauri-apps/plugin-shell';
-import {AlertTriangle, CheckCircle2, GitBranch, Play, RefreshCw, Send, StopCircle} from 'lucide-react';
+import {AlertTriangle, CheckCircle2, FileJson, GitBranch, Hammer, Play, RefreshCw, RotateCcw, Save, Send, Settings, StopCircle} from 'lucide-react';
 
 type Phase = 'idle' | 'planning' | 'awaiting_choice' | 'executing' | 'reviewing' | 'done' | 'error';
 type LogLevel = 'output' | 'diagnostic' | 'error';
@@ -20,7 +20,9 @@ type Snapshot = {
   targetCwd: string;
   repoRoot: string;
   configPath: string;
-  configSource: 'workspace' | 'default';
+  configSource: 'workspace' | 'global' | 'default';
+  rawConfig: string;
+  effectiveConfigJson: string;
   isGitRepository: boolean;
   canRunWorkflows: boolean;
   agents: string[];
@@ -42,10 +44,17 @@ type WorkerResponse =
 export function App() {
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
   const [draft, setDraft] = useState('');
+  const [activeTab, setActiveTab] = useState<'transcript' | 'settings'>('transcript');
+  const [settingsView, setSettingsView] = useState<'raw' | 'effective'>('raw');
+  const [settingsRaw, setSettingsRaw] = useState('');
+  const [settingsDirty, setSettingsDirty] = useState(false);
+  const [settingsNotice, setSettingsNotice] = useState<string | null>(null);
   const [status, setStatus] = useState('starting desktop worker...');
   const [workerError, setWorkerError] = useState<string | null>(null);
   const childRef = useRef<Child | null>(null);
   const lineBuffer = useRef('');
+  const configIdentityRef = useRef('');
+  const pendingSettingsSaveRef = useRef(false);
 
   const busy = snapshot?.state.phase === 'planning'
     || snapshot?.state.phase === 'executing'
@@ -57,7 +66,7 @@ export function App() {
     let disposed = false;
     void startWorker((response) => {
       if (disposed) return;
-      handleWorkerResponse(response, setSnapshot, setStatus, setWorkerError);
+      handleWorkerResponse(response, setSnapshot, setStatus, setWorkerError, setSettingsNotice, pendingSettingsSaveRef);
     }, childRef, lineBuffer).catch((error: unknown) => {
       if (!disposed) setWorkerError(error instanceof Error ? error.message : String(error));
     });
@@ -79,6 +88,24 @@ export function App() {
     return () => window.removeEventListener('keydown', onKeyDown);
   }, []);
 
+  useEffect(() => {
+    if (!snapshot) return;
+
+    // Refresh the editor when the loaded settings source changes or no local edits exist.
+    const identity = `${snapshot.configSource}:${snapshot.configPath}`;
+    if (settingsDirty && snapshot.rawConfig === settingsRaw) {
+      pendingSettingsSaveRef.current = false;
+      setSettingsDirty(false);
+      setSettingsNotice('Settings saved and reloaded.');
+      return;
+    }
+    if (identity !== configIdentityRef.current || !settingsDirty) {
+      configIdentityRef.current = identity;
+      setSettingsRaw(snapshot.rawConfig);
+      setSettingsDirty(false);
+    }
+  }, [snapshot, settingsDirty, settingsRaw]);
+
   const submit = useCallback(() => {
     // Plain text starts planning, matching the current TaskForge interaction model.
     const text = draft.trim();
@@ -93,68 +120,155 @@ export function App() {
     return phase.replace('_', ' ');
   }, [snapshot?.state.phase]);
 
+  const settingsActive = activeTab === 'settings';
+
   return (
     <main className="shell">
-      <header className="topbar">
-        <div>
-          <div className="brand">TaskForge</div>
-          <div className="workspace">{snapshot?.workspaceRoot ?? status}</div>
-        </div>
-        <div className="statusCluster">
-          <span className={`pill ${snapshot?.isGitRepository ? 'ok' : 'warn'}`}>
-            <GitBranch size={14} />
-            {snapshot?.isGitRepository ? 'git ready' : 'no git repo'}
+      <aside className="sidenav" aria-label="TaskForge navigation">
+        <div className="brand">
+          <span className="brandMark" aria-hidden="true">
+            <Hammer size={18} />
           </span>
-          <span className="pill">{snapshot?.agents.join(' + ') || 'agents loading'}</span>
-          <span className={`pill phase ${busy ? 'busy' : ''}`}>{phaseLabel}</span>
+          <span className="brandText">TaskForge</span>
         </div>
-      </header>
-
-      {workerError && (
-        <div className="banner error">
-          <AlertTriangle size={16} />
-          {workerError}
+        <nav>
+          <button
+            type="button"
+            className={`navItem ${activeTab === 'transcript' ? 'active' : ''}`}
+            onClick={() => setActiveTab('transcript')}
+          >
+            <FileJson size={16} />
+            Transcript
+          </button>
+          <button
+            type="button"
+            className={`navItem ${activeTab === 'settings' ? 'active' : ''}`}
+            onClick={() => setActiveTab('settings')}
+          >
+            <Settings size={16} />
+            Settings
+          </button>
+        </nav>
+        <div className="sideFoot">
+          <span className="agentsLine">{snapshot?.agents.join(' + ') || 'agents loading'}</span>
+          <span>{snapshot?.workspaceRoot ?? status}</span>
         </div>
-      )}
+      </aside>
 
-      <section className="transcript" aria-label="TaskForge transcript">
-        {(snapshot?.state.entries ?? []).map((entry, index) => (
-          <TranscriptRow entry={entry} key={`${entry.ts}-${index}`} />
-        ))}
+      <section className={`workspace ${settingsActive ? 'settingsActive' : ''}`}>
+        <header className="topbar">
+          <h1>{settingsActive ? 'Settings' : 'Transcript'}</h1>
+          <div className="statusCluster">
+            <span className={`pill ${snapshot?.isGitRepository ? 'ok' : 'warn'}`}>
+              <GitBranch size={14} />
+              {snapshot?.isGitRepository ? 'git ready' : 'no git repo'}
+            </span>
+            <span className={`pill phase ${busy ? 'busy' : ''}`}>{phaseLabel}</span>
+          </div>
+        </header>
+
+        {workerError && (
+          <div className="banner error">
+            <AlertTriangle size={16} />
+            {workerError}
+          </div>
+        )}
+
+        {settingsActive ? (
+          <section className="settingsPanel" aria-label="TaskForge settings">
+            <div className="settingsHeader">
+              <div>
+                <h2>Settings JSON</h2>
+                <p>{snapshot?.configSource ?? 'loading'} · {snapshot?.configPath ?? 'waiting for worker'}</p>
+              </div>
+              <div className="segmented">
+                <button type="button" className={settingsView === 'raw' ? 'active' : ''} onClick={() => setSettingsView('raw')}>Raw</button>
+                <button type="button" className={settingsView === 'effective' ? 'active' : ''} onClick={() => setSettingsView('effective')}>Effective</button>
+              </div>
+            </div>
+            <textarea
+              className="settingsEditor"
+              value={settingsView === 'raw' ? settingsRaw : snapshot?.effectiveConfigJson ?? ''}
+              readOnly={settingsView === 'effective'}
+              spellCheck={false}
+              onChange={(event) => {
+                setSettingsRaw(event.currentTarget.value);
+                setSettingsDirty(true);
+                setSettingsNotice(null);
+              }}
+            />
+            <div className="settingsActions">
+              <button
+                type="button"
+                onClick={() => {
+                  pendingSettingsSaveRef.current = true;
+                  setSettingsNotice('Saving settings...');
+                  void sendWorkerRequest(childRef.current, {type: 'saveSettings', rawJson: settingsRaw});
+                }}
+                disabled={busy || settingsView !== 'raw' || !settingsDirty}
+              >
+                <Save size={15} />
+                Save
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setSettingsRaw(snapshot?.rawConfig ?? '');
+                  setSettingsDirty(false);
+                  setSettingsNotice(null);
+                }}
+                disabled={!settingsDirty}
+              >
+                <RotateCcw size={15} />
+                Reset changes
+              </button>
+              {settingsNotice && <span>{settingsNotice}</span>}
+              {busy && <span>Finish or cancel active task before saving settings.</span>}
+            </div>
+          </section>
+        ) : (
+          <section className="transcript" aria-label="TaskForge transcript">
+            {(snapshot?.state.entries ?? []).map((entry, index) => (
+              <TranscriptRow entry={entry} key={`${entry.ts}-${index}`} />
+            ))}
+          </section>
+        )}
+
+        {!settingsActive && (
+          <footer className="composer">
+            <div className="actions">
+              <button type="button" onClick={() => void sendWorkerRequest(childRef.current, {type: 'executeSelected'})} disabled={!canExecute || busy}>
+                <Play size={15} />
+                Execute
+              </button>
+              <button type="button" onClick={() => void sendWorkerRequest(childRef.current, {type: 'review'})} disabled={busy}>
+                <RefreshCw size={15} />
+                Review
+              </button>
+              <button type="button" onClick={() => void sendWorkerRequest(childRef.current, {type: 'cancel'})} disabled={!busy && snapshot?.state.phase !== 'awaiting_choice'}>
+                <StopCircle size={15} />
+                Stop
+              </button>
+              <button type="button" onClick={() => void sendWorkerRequest(childRef.current, {type: 'clear'})}>
+                Clear
+              </button>
+            </div>
+            <div className="inputRow">
+              <textarea
+                value={draft}
+                onChange={(event) => setDraft(event.currentTarget.value)}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) submit();
+                }}
+                placeholder="Ask TaskForge to plan work in this folder..."
+              />
+              <button type="button" className="send" onClick={submit} disabled={busy || !draft.trim()}>
+                <Send size={18} />
+              </button>
+            </div>
+          </footer>
+        )}
       </section>
-
-      <footer className="composer">
-        <div className="actions">
-          <button type="button" onClick={() => void sendWorkerRequest(childRef.current, {type: 'executeSelected'})} disabled={!canExecute || busy}>
-            <Play size={15} />
-            Execute
-          </button>
-          <button type="button" onClick={() => void sendWorkerRequest(childRef.current, {type: 'review'})} disabled={busy}>
-            <RefreshCw size={15} />
-            Review
-          </button>
-          <button type="button" onClick={() => void sendWorkerRequest(childRef.current, {type: 'cancel'})} disabled={!busy && snapshot?.state.phase !== 'awaiting_choice'}>
-            <StopCircle size={15} />
-            Stop
-          </button>
-          <button type="button" onClick={() => void sendWorkerRequest(childRef.current, {type: 'clear'})}>
-            Clear
-          </button>
-        </div>
-        <div className="inputRow">
-          <textarea
-            value={draft}
-            onChange={(event) => setDraft(event.currentTarget.value)}
-            onKeyDown={(event) => {
-              if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) submit();
-            }}
-            placeholder="Ask TaskForge to plan work in this folder..."
-          />
-          <button type="button" className="send" onClick={submit} disabled={busy || !draft.trim()}>
-            <Send size={18} />
-          </button>
-        </div>
-      </footer>
     </main>
   );
 }
@@ -200,7 +314,9 @@ function handleWorkerResponse(
   response: WorkerResponse,
   setSnapshot: (snapshot: Snapshot) => void,
   setStatus: (status: string) => void,
-  setWorkerError: (error: string | null) => void
+  setWorkerError: (error: string | null) => void,
+  setSettingsNotice: (notice: string | null) => void,
+  pendingSettingsSaveRef: React.MutableRefObject<boolean>
 ): void {
   // Only state events update the app model; other messages are status/diagnostics.
   if (response.type === 'ready') {
@@ -208,6 +324,10 @@ function handleWorkerResponse(
     return;
   }
   if (response.type === 'error') {
+    if (pendingSettingsSaveRef.current) {
+      pendingSettingsSaveRef.current = false;
+      setSettingsNotice(`Settings save failed: ${response.message}`);
+    }
     setWorkerError(response.message);
     return;
   }

@@ -1,4 +1,4 @@
-import {loadConfig, LoadedConfig} from '../config/loadConfig.js';
+import {loadConfig, LoadedConfig, validateAndWriteConfig} from '../config/loadConfig.js';
 import {runPlanMode} from '../workflows/planMode.js';
 import {runPlanMergeMode} from '../workflows/planMergeMode.js';
 import {runExecuteMode} from '../workflows/executeMode.js';
@@ -20,6 +20,8 @@ export type TaskForgeSnapshot = {
   repoRoot: string;
   configPath: string;
   configSource: LoadedConfig['configSource'];
+  rawConfig: string;
+  effectiveConfigJson: string;
   isGitRepository: boolean;
   canRunWorkflows: boolean;
   agents: string[];
@@ -81,6 +83,8 @@ export class TaskForgeSession {
       repoRoot: this.loadedConfig.repoRoot,
       configPath: this.loadedConfig.configPath,
       configSource: this.loadedConfig.configSource,
+      rawConfig: this.loadedConfig.rawConfig,
+      effectiveConfigJson: this.loadedConfig.effectiveConfigJson,
       isGitRepository: this.loadedConfig.isGitRepository,
       canRunWorkflows: this.loadedConfig.isGitRepository,
       agents: Object.keys(this.loadedConfig.config.agents),
@@ -186,6 +190,28 @@ export class TaskForgeSession {
   clear(): void {
     // Keep clear local to the transcript; config and workspace context remain loaded.
     this.dispatch({type: 'clear'});
+    this.emitState();
+  }
+
+  async saveSettings(rawJson: string): Promise<void> {
+    const busy = this.state.phase === 'planning'
+      || this.state.phase === 'executing'
+      || this.state.phase === 'reviewing'
+      || this.state.phase === 'awaiting_choice';
+
+    if (busy) {
+      this.addEntry({kind: 'system', text: 'Settings cannot be saved while a task is active.', level: 'warn', ts: Date.now()});
+      return;
+    }
+
+    // Validate and write first, then reload so derived paths and schema defaults refresh together.
+    await validateAndWriteConfig(rawJson, this.loadedConfig.configPath);
+    this.loadedConfig = await loadConfig({
+      cwd: this.loadedConfig.workspaceRoot,
+      allowMissingConfig: true,
+      allowMissingGit: true,
+    });
+    this.addEntry({kind: 'system', text: `Settings saved: ${this.loadedConfig.configPath}`, level: 'info', ts: Date.now()});
     this.emitState();
   }
 
