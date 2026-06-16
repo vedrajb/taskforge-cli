@@ -3,16 +3,18 @@ import {promises as fs} from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {promisify} from 'node:util';
+import {parse as parseJsonc, printParseErrorCode, type ParseError} from 'jsonc-parser';
 import {TaskForgeConfig, TaskForgeConfigSchema} from './schema.js';
-import {createDefaultConfig} from './defaultConfig.js';
+import {createDefaultConfig, createDefaultConfigJsonc} from './defaultConfig.js';
 
 const execFileAsync = promisify(execFile);
-export const DEFAULT_CONFIG_FILE = 'taskforge.config.json';
-export const GLOBAL_CONFIG_FILE = path.join(os.homedir(), '.config', 'settings.json');
+export const DEFAULT_CONFIG_FILE = 'taskforge.config.jsonc';
+export const GLOBAL_CONFIG_FILE = path.join(os.homedir(), '.config', 'settings.jsonc');
 
 export type LoadedConfig = {
   config: TaskForgeConfig;
   configPath: string;
+  saveConfigPath: string;
   configSource: 'workspace' | 'global' | 'default';
   rawConfig: string;
   effectiveConfigJson: string;
@@ -37,7 +39,7 @@ export async function loadConfig(options: LoadConfigOptions = {}): Promise<Loade
   const workspaceRepoRoot = await resolveGitRepository(cwd, options.allowMissingGit ?? false);
 
   // Parse and validate the config before deriving runtime paths from it.
-  const {config, source, configPath, rawConfig} = await readConfigFile(
+  const {config, source, configPath, saveConfigPath, rawConfig} = await readConfigFile(
     workspaceConfigPath,
     options.allowMissingConfig ?? false
   );
@@ -48,6 +50,7 @@ export async function loadConfig(options: LoadConfigOptions = {}): Promise<Loade
   return {
     config,
     configPath,
+    saveConfigPath,
     configSource: source,
     rawConfig,
     effectiveConfigJson: JSON.stringify(config, null, 2),
@@ -61,16 +64,26 @@ export async function loadConfig(options: LoadConfigOptions = {}): Promise<Loade
 async function readConfigFile(
   workspaceConfigPath: string,
   allowMissingConfig: boolean
-): Promise<{config: TaskForgeConfig; source: LoadedConfig['configSource']; configPath: string; rawConfig: string}> {
-  // Try workspace first, then global settings, then bundled defaults if allowed.
+): Promise<{config: TaskForgeConfig; source: LoadedConfig['configSource']; configPath: string; saveConfigPath: string; rawConfig: string}> {
+  // Strictly use JSONC config files at workspace and global scopes.
   const workspace = await tryReadConfigFile(workspaceConfigPath);
   if (workspace) {
-    return {...parseConfigJson(workspace.rawConfig, workspace.path), source: 'workspace', configPath: workspace.path};
+    return {
+      ...parseConfigJsonc(workspace.rawConfig, workspace.path),
+      source: 'workspace',
+      configPath: workspace.path,
+      saveConfigPath: workspaceConfigPath,
+    };
   }
 
   const global = await tryReadConfigFile(GLOBAL_CONFIG_FILE);
   if (global) {
-    return {...parseConfigJson(global.rawConfig, global.path), source: 'global', configPath: global.path};
+    return {
+      ...parseConfigJsonc(global.rawConfig, global.path),
+      source: 'global',
+      configPath: global.path,
+      saveConfigPath: GLOBAL_CONFIG_FILE,
+    };
   }
 
   if (allowMissingConfig) {
@@ -79,7 +92,8 @@ async function readConfigFile(
       config,
       source: 'default',
       configPath: GLOBAL_CONFIG_FILE,
-      rawConfig: JSON.stringify(config, null, 2),
+      saveConfigPath: GLOBAL_CONFIG_FILE,
+      rawConfig: createDefaultConfigJsonc(),
     };
   }
 
@@ -96,25 +110,45 @@ async function tryReadConfigFile(configPath: string): Promise<{path: string; raw
   }
 }
 
-function parseConfigJson(rawConfig: string, configPath: string): {config: TaskForgeConfig; rawConfig: string} {
-  // Keep JSON parsing separate from schema validation for clearer startup failures.
-  let parsedConfig: unknown;
-  try {
-    parsedConfig = JSON.parse(rawConfig);
-  } catch (error: unknown) {
-    const message = error instanceof Error ? error.message : String(error);
-    throw new Error(`Invalid JSON in ${configPath}: ${message}`);
+function parseConfigJsonc(rawConfig: string, configPath: string): {config: TaskForgeConfig; rawConfig: string} {
+  // Parse JSONC first so comments and trailing commas are accepted before schema validation.
+  const errors: ParseError[] = [];
+  const parsedConfig = parseJsonc(rawConfig, errors, {
+    allowTrailingComma: true,
+    disallowComments: false,
+  });
+  if (errors.length) {
+    const first = errors[0]!;
+    const location = offsetToLineColumn(rawConfig, first.offset);
+    throw new Error(
+      `Invalid JSONC in ${configPath}:${location.line}:${location.column}: ${printParseErrorCode(first.error)}`
+    );
   }
 
   return {config: TaskForgeConfigSchema.parse(parsedConfig), rawConfig};
 }
 
 export async function validateAndWriteConfig(rawConfig: string, configPath: string): Promise<TaskForgeConfig> {
-  // Validate before writing so bad JSON never replaces a working settings file.
-  const {config} = parseConfigJson(rawConfig, configPath);
+  // Validate before writing so bad JSONC never replaces a working settings file.
+  const {config} = parseConfigJsonc(rawConfig, configPath);
   await fs.mkdir(path.dirname(configPath), {recursive: true});
   await fs.writeFile(configPath, rawConfig, 'utf8');
   return config;
+}
+
+function offsetToLineColumn(text: string, offset: number): {line: number; column: number} {
+  // Convert jsonc-parser offsets into one-based editor coordinates.
+  let line = 1;
+  let column = 1;
+  for (let i = 0; i < offset; i++) {
+    if (text[i] === '\n') {
+      line++;
+      column = 1;
+    } else {
+      column++;
+    }
+  }
+  return {line, column};
 }
 
 async function assertGitRepository(cwd: string): Promise<string> {

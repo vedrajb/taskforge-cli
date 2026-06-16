@@ -20,6 +20,7 @@ type Snapshot = {
   targetCwd: string;
   repoRoot: string;
   configPath: string;
+  saveConfigPath: string;
   configSource: 'workspace' | 'global' | 'default';
   rawConfig: string;
   effectiveConfigJson: string;
@@ -178,8 +179,11 @@ export function App() {
           <section className="settingsPanel" aria-label="TaskForge settings">
             <div className="settingsHeader">
               <div>
-                <h2>Settings JSON</h2>
-                <p>{snapshot?.configSource ?? 'loading'} · {snapshot?.configPath ?? 'waiting for worker'}</p>
+                <h2>Settings JSONC</h2>
+                <p>
+                  {snapshot?.configSource ?? 'loading'} · {snapshot?.configPath ?? 'waiting for worker'}
+                  {snapshot && snapshot.saveConfigPath !== snapshot.configPath ? ` · saves to ${snapshot.saveConfigPath}` : ''}
+                </p>
               </div>
               <div className="segmented">
                 <button type="button" className={settingsView === 'raw' ? 'active' : ''} onClick={() => setSettingsView('raw')}>Raw</button>

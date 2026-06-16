@@ -19,6 +19,7 @@ export type TaskForgeSnapshot = {
   targetCwd: string;
   repoRoot: string;
   configPath: string;
+  saveConfigPath: string;
   configSource: LoadedConfig['configSource'];
   rawConfig: string;
   effectiveConfigJson: string;
@@ -48,7 +49,7 @@ export class TaskForgeSession {
     if (loadedConfig.configSource === 'default') {
       this.addEntry({
         kind: 'system',
-        text: 'No taskforge.config.json found here. Using bundled defaults.',
+        text: 'No taskforge.config.jsonc found here. Using bundled defaults.',
         level: 'warn',
         ts: Date.now(),
       });
@@ -82,6 +83,7 @@ export class TaskForgeSession {
       targetCwd: this.loadedConfig.targetCwd,
       repoRoot: this.loadedConfig.repoRoot,
       configPath: this.loadedConfig.configPath,
+      saveConfigPath: this.loadedConfig.saveConfigPath,
       configSource: this.loadedConfig.configSource,
       rawConfig: this.loadedConfig.rawConfig,
       effectiveConfigJson: this.loadedConfig.effectiveConfigJson,
@@ -205,7 +207,7 @@ export class TaskForgeSession {
     }
 
     // Validate and write first, then reload so derived paths and schema defaults refresh together.
-    await validateAndWriteConfig(rawJson, this.loadedConfig.configPath);
+    await validateAndWriteConfig(rawJson, this.loadedConfig.saveConfigPath);
     this.loadedConfig = await loadConfig({
       cwd: this.loadedConfig.workspaceRoot,
       allowMissingConfig: true,
