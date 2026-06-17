@@ -32,5 +32,5 @@ fn main() {
         .plugin(tauri_plugin_shell::init())
         .invoke_handler(tauri::generate_handler![launch_context])
         .run(tauri::generate_context!())
-        .expect("error while running TaskForge desktop");
+        .expect("error while running HiveMind desktop");
 }

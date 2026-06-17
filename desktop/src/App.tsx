@@ -1,7 +1,7 @@
 import {useCallback, useEffect, useMemo, useRef, useState} from 'react';
 import {invoke} from '@tauri-apps/api/core';
 import {Command, type Child} from '@tauri-apps/plugin-shell';
-import {AlertTriangle, CheckCircle2, FileJson, GitBranch, Hammer, Play, RefreshCw, RotateCcw, Save, Send, Settings, StopCircle} from 'lucide-react';
+import {AlertTriangle, CheckCircle2, FileJson, GitBranch, Play, RefreshCw, RotateCcw, Save, Send, Settings, StopCircle} from 'lucide-react';
 
 type Phase = 'idle' | 'planning' | 'awaiting_choice' | 'executing' | 'reviewing' | 'done' | 'error';
 type LogLevel = 'output' | 'diagnostic' | 'error';
@@ -108,7 +108,7 @@ export function App() {
   }, [snapshot, settingsDirty, settingsRaw]);
 
   const submit = useCallback(() => {
-    // Plain text starts planning, matching the current TaskForge interaction model.
+    // Plain text starts planning, matching the current HiveMind interaction model.
     const text = draft.trim();
     if (!text) return;
     setDraft('');
@@ -125,12 +125,12 @@ export function App() {
 
   return (
     <main className="shell">
-      <aside className="sidenav" aria-label="TaskForge navigation">
+      <aside className="sidenav" aria-label="HiveMind navigation">
         <div className="brand">
           <span className="brandMark" aria-hidden="true">
-            <Hammer size={18} />
+            <BrandMark />
           </span>
-          <span className="brandText">TaskForge</span>
+          <span className="brandText">HiveMind</span>
         </div>
         <nav>
           <button
@@ -176,7 +176,7 @@ export function App() {
         )}
 
         {settingsActive ? (
-          <section className="settingsPanel" aria-label="TaskForge settings">
+          <section className="settingsPanel" aria-label="HiveMind settings">
             <div className="settingsHeader">
               <div>
                 <h2>Settings JSONC</h2>
@@ -231,7 +231,7 @@ export function App() {
             </div>
           </section>
         ) : (
-          <section className="transcript" aria-label="TaskForge transcript">
+          <section className="transcript" aria-label="HiveMind transcript">
             {(snapshot?.state.entries ?? []).map((entry, index) => (
               <TranscriptRow entry={entry} key={`${entry.ts}-${index}`} />
             ))}
@@ -264,7 +264,7 @@ export function App() {
                 onKeyDown={(event) => {
                   if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) submit();
                 }}
-                placeholder="Ask TaskForge to plan work in this folder..."
+                placeholder="Ask HiveMind to plan work in this folder..."
               />
               <button type="button" className="send" onClick={submit} disabled={busy || !draft.trim()}>
                 <Send size={18} />
@@ -346,6 +346,11 @@ async function sendWorkerRequest(child: Child | null, request: Record<string, un
 
   // Stdin is the command channel; state returns asynchronously over stdout.
   await child.write(`${JSON.stringify({...request, id: crypto.randomUUID()})}\n`);
+}
+
+function BrandMark() {
+  // Same artwork as the app/window icon, served from desktop/public.
+  return <img className="brandImg" src="/icon.png" alt="HiveMind" width={38} height={38} />;
 }
 
 function TranscriptRow({entry}: {entry: TranscriptEntry}) {
